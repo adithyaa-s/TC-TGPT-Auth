@@ -24,27 +24,28 @@ class TrainerCentralContext:
         oauth: Optional[ZohoOAuth] = None,
     ):
         self.oauth = oauth or ZohoOAuth()
-        self.domain = (
-            (domain or self.oauth.domain or os.getenv("API_DOMAIN") or "").rstrip("/")
-        )
-        if not self.domain:
-            raise ValueError(
-                "DOMAIN/API_DOMAIN missing. Provide it via OAuth payload or .env."
-            )
+        self.domain = (domain or self.oauth.domain or os.getenv("API_DOMAIN") or "").rstrip("/")
 
         # Prefer provided org_id, then OAuth-derived org_id, then attempt a portals.json lookup.
         self.org_id = org_id or self.oauth.org_id
         if not self.org_id:
-            self.oauth.fetch_org_id_from_portals(portals_base_url=self.domain)
+            self.oauth.fetch_org_id_from_portals(portals_base_url=self.domain or None)
             self.org_id = self.oauth.org_id
 
+    @property
+    def base_url(self) -> str:
+        if not self.domain:
+            raise ValueError(
+                "DOMAIN/API_DOMAIN missing. Provide it via OAuth payload or .env."
+            )
+        if not self.org_id:
+            # Last-chance fetch
+            self.oauth.fetch_org_id_from_portals(portals_base_url=self.domain)
+            self.org_id = self.oauth.org_id
         if not self.org_id:
             raise ValueError(
                 "ORG_ID missing. Provide it via OAuth payload, .env, or ensure portals.json is reachable."
             )
-
-    @property
-    def base_url(self) -> str:
         return f"{self.domain}/api/v4/{self.org_id}"
 
 
