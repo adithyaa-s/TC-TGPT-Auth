@@ -19,7 +19,8 @@ def start_metadata_server():
     import uvicorn
     from server import app
 
-    port = int(os.getenv("METADATA_PORT", "8000"))
+    # Prefer Render's PORT if present, else METADATA_PORT, else 8000.
+    port = int(os.getenv("PORT") or os.getenv("METADATA_PORT") or "8000")
     host = os.getenv("METADATA_HOST", "0.0.0.0")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
@@ -32,12 +33,7 @@ def main():
     executor.submit(start_metadata_server)
 
     # Run MCP (blocking)
-    # mcp.run()
-    mcp.run(
-    transport="http",
-    host="0.0.0.0",
-    port=8000
-    )
+    mcp.run()
 
 
 if __name__ == "__main__":

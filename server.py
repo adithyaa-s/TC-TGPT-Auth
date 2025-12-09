@@ -68,6 +68,12 @@ async def well_known_oauth_authorization_server():
     return oauth_authorization_server_metadata()
 
 
+@app.get("/.well-known/openid-configuration")
+async def well_known_openid_configuration():
+    # Mirror the same data for clients that probe OIDC discovery
+    return oauth_authorization_server_metadata()
+
+
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
@@ -84,4 +90,18 @@ def make_unauthorized_response(scope: str | None = None) -> Response:
         challenge += f', scope="{scope}"'
     headers = {"WWW-Authenticate": challenge}
     return Response(status_code=401, headers=headers)
+
+
+@app.api_route("/mcp", methods=["GET", "POST"])
+@app.api_route("/mcp/", methods=["GET", "POST"])
+async def mcp_placeholder():
+    """
+    Placeholder to avoid 404s when ChatGPT probes /mcp. MCP still runs over the
+    FastMCP transport; HTTP here just returns a clear error.
+    """
+    return Response(
+        status_code=406,
+        content="MCP is not served over HTTP here. Use the MCP transport configured in your client.",
+        media_type="text/plain",
+    )
 
