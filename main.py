@@ -32,7 +32,12 @@ def main():
     executor.submit(start_metadata_server)
 
     # Run MCP (blocking)
-    mcp.run()
+    # mcp.run()
+    mcp.run(
+    transport="http",
+    host="0.0.0.0",
+    port=8000
+    )
 
 
 if __name__ == "__main__":
