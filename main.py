@@ -9,12 +9,12 @@ import tools.course_live_workshops.course_live_workshop_handler
 
 def main():
     mcp = get_mcp()
-    mcp.run()
-#     mcp.run(
-#     transport="http",
-#     host="0.0.0.0",
-#     port=8000
-# )
+    # mcp.run()
+    mcp.run(
+    transport="http",
+    host="0.0.0.0",
+    port=8000
+)
 
 if __name__ == "__main__":
     main()
