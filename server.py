@@ -685,36 +685,173 @@ async def mcp_endpoint(request: Request):
             # If we still don't have a callable, try direct library call as last resort
             if not actual_func or not callable(actual_func):
                 # Last resort: call the underlying library functions directly
-                # This maps tool names to their library classes and methods
+                # This maps tool names to their library classes, methods, and argument mappers
+                def call_library_function(lib_module_path, class_name, method_name, arg_mapper):
+                    """Helper to call library functions with argument mapping"""
+                    lib_module = importlib.import_module(lib_module_path)
+                    lib_class = getattr(lib_module, class_name)
+                    lib_instance = lib_class()
+                    lib_method = getattr(lib_instance, method_name)
+                    mapped_args = arg_mapper(arguments)
+                    if isinstance(mapped_args, dict):
+                        result = lib_method(**mapped_args)
+                    elif isinstance(mapped_args, tuple):
+                        result = lib_method(*mapped_args)
+                    else:
+                        result = lib_method(mapped_args)
+                    return result
+                
                 library_fallback_map = {
-                    "tc_list_courses": ("library.courses", "TrainerCentralCourses", "list_courses"),
-                    "tc_get_course": ("library.courses", "TrainerCentralCourses", "get_course"),
-                    "tc_create_course": ("library.courses", "TrainerCentralCourses", "post_course"),
-                    "tc_update_course": ("library.courses", "TrainerCentralCourses", "update_course"),
-                    "tc_delete_course": ("library.courses", "TrainerCentralCourses", "delete_course"),
+                    # Courses
+                    "tc_list_courses": (
+                        "library.courses", "TrainerCentralCourses", "list_courses",
+                        lambda args: {}
+                    ),
+                    "tc_get_course": (
+                        "library.courses", "TrainerCentralCourses", "get_course",
+                        lambda args: (args.get("course_id"),)
+                    ),
+                    "tc_create_course": (
+                        "library.courses", "TrainerCentralCourses", "post_course",
+                        lambda args: (args.get("course_data"),)
+                    ),
+                    "tc_update_course": (
+                        "library.courses", "TrainerCentralCourses", "update_course",
+                        lambda args: (args.get("course_id"), args.get("updates"))
+                    ),
+                    "tc_delete_course": (
+                        "library.courses", "TrainerCentralCourses", "delete_course",
+                        lambda args: (args.get("course_id"),)
+                    ),
+                    # Chapters
+                    "tc_create_chapter": (
+                        "library.chapters", "TrainerCentralChapters", "create_chapter",
+                        lambda args: (args.get("section_data"),)
+                    ),
+                    "tc_update_chapter": (
+                        "library.chapters", "TrainerCentralChapters", "update_chapter",
+                        lambda args: (args.get("course_id"), args.get("section_id"), args.get("updates"))
+                    ),
+                    "tc_delete_chapter": (
+                        "library.chapters", "TrainerCentralChapters", "delete_chapter",
+                        lambda args: (args.get("course_id"), args.get("section_id"))
+                    ),
+                    # Lessons
+                    "tc_create_lesson": (
+                        "library.lessons", "TrainerCentralLessons", "create_lesson_with_content",
+                        lambda args: {
+                            "lesson_data": args.get("session_data"),
+                            "content_html": args.get("content_html"),
+                            "content_filename": args.get("content_filename", "Content")
+                        }
+                    ),
+                    "tc_update_lesson": (
+                        "library.lessons", "TrainerCentralLessons", "update_lesson",
+                        lambda args: (args.get("session_id"), args.get("updates"))
+                    ),
+                    "tc_delete_lesson": (
+                        "library.lessons", "TrainerCentralLessons", "delete_lesson",
+                        lambda args: (args.get("session_id"),)
+                    ),
+                    # Assignments
+                    "tc_create_assignment": (
+                        "library.assignments", "TrainerCentralAssignments", "create_assignment_with_instructions",
+                        lambda args: {
+                            "assignment_data": args.get("assignment_data"),
+                            "instruction_html": args.get("instruction_html"),
+                            "instruction_filename": args.get("instruction_filename", "Instructions"),
+                            "view_type": args.get("view_type", 4)
+                        }
+                    ),
+                    "tc_delete_assignment": (
+                        "library.assignments", "TrainerCentralAssignments", "delete_assignment",
+                        lambda args: (args.get("session_id"),)
+                    ),
+                    # Tests
+                    "tc_create_full_test": (
+                        "library.tests", "TrainerCentralTests", "create_full_test",
+                        lambda args: (args.get("session_id"), args.get("name"), args.get("description_html"), args.get("questions"))
+                    ),
+                    "tc_create_test_form": (
+                        "library.tests", "TrainerCentralTests", "create_test_form",
+                        lambda args: (args.get("session_id"), args.get("name"), args.get("description_html"))
+                    ),
+                    "tc_add_test_questions": (
+                        "library.tests", "TrainerCentralTests", "add_questions",
+                        lambda args: (args.get("session_id"), args.get("form_id_value"), args.get("questions"))
+                    ),
+                    "tc_get_course_sessions": (
+                        "library.tests", "TrainerCentralTests", "get_course_sessions",
+                        lambda args: (args.get("course_id"),)
+                    ),
+                    # Live Workshops (Global)
+                    "tc_create_workshop": (
+                        "library.live_workshops", "TrainerCentralLiveWorkshops", "create_global_workshop",
+                        lambda args: {
+                            "name": args.get("session_data", {}).get("name", "") if isinstance(args.get("session_data"), dict) else args.get("name", ""),
+                            "description_html": args.get("session_data", {}).get("description", "") if isinstance(args.get("session_data"), dict) else args.get("description_html", args.get("description", "")),
+                            "start_time_str": args.get("session_data", {}).get("start_time_str", "") if isinstance(args.get("session_data"), dict) else args.get("start_time_str", ""),
+                            "end_time_str": args.get("session_data", {}).get("end_time_str", "") if isinstance(args.get("session_data"), dict) else args.get("end_time_str", "")
+                        }
+                    ),
+                    "tc_update_workshop": (
+                        "library.live_workshops", "TrainerCentralLiveWorkshops", "update_workshop",
+                        lambda args: (args.get("session_id"), args.get("updates"))
+                    ),
+                    "tc_create_workshop_occurrence": (
+                        "library.live_workshops", "TrainerCentralLiveWorkshops", "create_occurrence",
+                        lambda args: (args.get("talk_data"),)
+                    ),
+                    "tc_update_workshop_occurrence": (
+                        "library.live_workshops", "TrainerCentralLiveWorkshops", "update_occurrence",
+                        lambda args: (args.get("talk_id"), args.get("updates"))
+                    ),
+                    "tc_list_all_global_workshops": (
+                        "library.live_workshops", "TrainerCentralLiveWorkshops", "list_all_upcoming_workshops",
+                        lambda args: (args.get("filter_type", 5), args.get("limit", 50), args.get("si", 0))
+                    ),
+                    "tc_invite_user_to_session": (
+                        "library.live_workshops", "TrainerCentralLiveWorkshops", "invite_user_to_workshop",
+                        lambda args: (args.get("session_id"), args.get("email"), args.get("role", 3), args.get("source", 1))
+                    ),
+                    # Course Live Workshops
+                    "tc_create_course_live_session": (
+                        "library.course_live_workshops", "TrainerCentralLiveWorkshops", "create_course_live_workshop",
+                        lambda args: {
+                            "course_id": args.get("course_id"),
+                            "name": args.get("name"),
+                            "description_html": args.get("description_html"),
+                            "start_time_str": args.get("start_time"),
+                            "end_time_str": args.get("end_time")
+                        }
+                    ),
+                    "tc_list_course_live_sessions": (
+                        "library.course_live_workshops", "TrainerCentralLiveWorkshops", "list_upcoming_live_sessions",
+                        lambda args: (args.get("filter_type", 5), args.get("limit", 50), args.get("si", 0))
+                    ),
+                    "tc_delete_course_live_session": (
+                        "library.course_live_workshops", "TrainerCentralLiveWorkshops", "delete_live_session",
+                        lambda args: (args.get("session_id"),)
+                    ),
+                    "invite_learner_to_course_or_course_live_session": (
+                        "library.course_live_workshops", "TrainerCentralLiveWorkshops", "invite_learner_to_course_or_course_live_session",
+                        lambda args: {
+                            "email": args.get("email"),
+                            "first_name": args.get("first_name"),
+                            "last_name": args.get("last_name"),
+                            "course_id": args.get("course_id"),
+                            "session_id": args.get("session_id"),
+                            "is_access_granted": args.get("is_access_granted", True),
+                            "expiry_time": args.get("expiry_time"),
+                            "expiry_duration": args.get("expiry_duration")
+                        }
+                    ),
                 }
                 
                 if tool_name in library_fallback_map:
                     try:
-                        lib_module_path, class_name, method_name = library_fallback_map[tool_name]
-                        lib_module = importlib.import_module(lib_module_path)
-                        lib_class = getattr(lib_module, class_name)
-                        lib_instance = lib_class()
-                        lib_method = getattr(lib_instance, method_name)
-                        
-                        # Map arguments appropriately
-                        if tool_name == "tc_list_courses":
-                            result = lib_method()
-                        elif tool_name == "tc_get_course":
-                            result = lib_method(arguments.get("course_id"))
-                        elif tool_name == "tc_create_course":
-                            result = lib_method(arguments.get("course_data"))
-                        elif tool_name == "tc_update_course":
-                            result = lib_method(arguments.get("course_id"), arguments.get("updates"))
-                        elif tool_name == "tc_delete_course":
-                            result = lib_method(arguments.get("course_id"))
-                        else:
-                            result = lib_method(**arguments)
+                        lib_module_path, class_name, method_name, arg_mapper = library_fallback_map[tool_name]
+                        result = call_library_function(lib_module_path, class_name, method_name, arg_mapper)
                         
                         return JSONResponse({
                             "jsonrpc": jsonrpc,
@@ -729,7 +866,17 @@ async def mcp_endpoint(request: Request):
                             },
                         })
                     except Exception as fallback_error:
-                        pass  # Continue to error response
+                        import traceback
+                        error_trace = traceback.format_exc()
+                        return JSONResponse({
+                            "jsonrpc": jsonrpc,
+                            "id": request_id,
+                            "error": {
+                                "code": -32000,
+                                "message": f"Library fallback error for {tool_name}: {str(fallback_error)}",
+                                "data": error_trace if os.getenv("DEBUG") else None,
+                            },
+                        }, status_code=200)
                 
                 return JSONResponse({
                     "jsonrpc": jsonrpc,
