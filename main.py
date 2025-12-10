@@ -1,6 +1,14 @@
-from concurrent.futures import ThreadPoolExecutor
+"""
+Main entry point for the TrainerCentral MCP server.
 
-from tools.mcp_registry import get_mcp
+This server runs over HTTP (FastAPI) instead of stdio, so ChatGPT can connect
+via POST requests to /mcp. The server also exposes OAuth metadata endpoints
+required by the ChatGPT Apps SDK.
+"""
+
+import os
+
+# Import all tool handlers to register them with FastMCP
 import tools.courses.course_handler
 import tools.chapters.chapter_handler
 import tools.lessons.lesson_handler
@@ -9,12 +17,15 @@ import tools.assignments.assignment_handler
 import tools.tests.test_handler
 import tools.course_live_workshops.course_live_workshop_handler
 
+# Import MCP registry to ensure tools are registered
+from tools.mcp_registry import get_mcp
 
-def start_metadata_server():
+
+def main():
     """
-    Runs the FastAPI metadata server in a background thread so MCP can run
-    simultaneously. The server exposes the well-known OAuth endpoints required
-    by ChatGPT Apps SDK.
+    Start the FastAPI server which serves both:
+    1. OAuth metadata endpoints (/.well-known/*)
+    2. MCP JSON-RPC endpoint (/mcp)
     """
     import uvicorn
     from server import app
@@ -22,26 +33,13 @@ def start_metadata_server():
     # Prefer Render's PORT if present, else METADATA_PORT, else 8000.
     port = int(os.getenv("PORT") or os.getenv("METADATA_PORT") or "8000")
     host = os.getenv("METADATA_HOST", "0.0.0.0")
+    
+    # Ensure tools are registered (side effect of imports above)
+    get_mcp()
+    
+    # Run FastAPI server (blocking)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
-def main():
-    mcp = get_mcp()
-
-    # Start metadata server in background
-    executor = ThreadPoolExecutor(max_workers=2)
-    executor.submit(start_metadata_server)
-
-    # Run MCP (blocking)
-    # mcp.run()
-    mcp.run(
-    transport="http",
-    host="0.0.0.0",
-    port=8000
-    )
-
-
 if __name__ == "__main__":
-    import os
-
     main()
