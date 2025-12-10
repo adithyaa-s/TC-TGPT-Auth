@@ -8,12 +8,15 @@ This module now supports dynamic credentials for ChatGPT Custom Connectors:
 
 import os
 import time
+import logging
 from typing import Any, Dict, Optional
 
 import dotenv
 import requests
 
 dotenv.load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class ZohoOAuth:
@@ -65,7 +68,7 @@ class ZohoOAuth:
             or os.getenv("ACCESS_TOKEN_EXPIRES_AT", "0")
         )
 
-        # Region-aware Zoho accounts URL (defaults to .com if unspecified)
+        # Region-aware Zoho accounts URL (defaults to .in if unspecified)
         self.accounts_base_url = (
             accounts_base_url
             or os.getenv("ZOHO_ACCOUNTS_URL")
@@ -95,6 +98,8 @@ class ZohoOAuth:
             or os.getenv("DOMAIN")
             or (f"{self.api_domain}/trainercentral" if self.api_domain else None)
         )
+        
+        logger.info(f"ZohoOAuth initialized with domain: {self.domain}, org_id: {self.org_id}")
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -107,6 +112,7 @@ class ZohoOAuth:
         Persist token fields from the Zoho OAuth response.
         """
         if "access_token" not in result:
+            logger.error(f"No access_token in response: {result}")
             raise Exception(f"Failed to acquire access token: {result}")
 
         self.access_token = result["access_token"]
@@ -119,6 +125,8 @@ class ZohoOAuth:
         self.api_domain = result.get("api_domain", self.api_domain)
         if not self.domain and self.api_domain:
             self.domain = f"{self.api_domain}/trainercentral"
+        
+        logger.info(f"Token refreshed successfully. Expires in {expires_in} seconds")
         return self.access_token
 
     # ------------------------------------------------------------------ #
@@ -148,20 +156,27 @@ class ZohoOAuth:
         if scope:
             data["scope"] = scope
 
-        response = requests.post(self._token_endpoint(), data=data, timeout=30)
-        response.raise_for_status()
-        self._apply_token_response(response.json())
+        try:
+            logger.info(f"Exchanging authorization code for tokens")
+            response = requests.post(self._token_endpoint(), data=data, timeout=30)
+            response.raise_for_status()
+            self._apply_token_response(response.json())
 
-        # If org_id is still missing, try to derive it from portals.json.
-        if not self.org_id:
-            self.fetch_org_id_from_portals(portals_base_url=portals_base_url)
-        return self.access_token
+            # If org_id is still missing, try to derive it from portals.json.
+            if not self.org_id:
+                self.fetch_org_id_from_portals(portals_base_url=portals_base_url)
+            
+            return self.access_token
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to exchange authorization code: {e}")
+            raise
 
     def refresh_access_token(self) -> str:
         """
         Refresh the Zoho OAuth2 access token using the stored refresh token.
         """
         if not self.refresh_token:
+            logger.error("Missing refresh_token for token refresh")
             raise Exception(
                 "Missing refresh_token. Ensure the OAuth 2.0 flow provided "
                 "one (ChatGPT Custom Connector should request offline access)."
@@ -174,17 +189,37 @@ class ZohoOAuth:
             "grant_type": "refresh_token",
         }
 
-        response = requests.post(self._token_endpoint(), data=data, timeout=30)
-        response.raise_for_status()
-        return self._apply_token_response(response.json())
+        try:
+            logger.info("Refreshing access token")
+            response = requests.post(self._token_endpoint(), data=data, timeout=30)
+            response.raise_for_status()
+            return self._apply_token_response(response.json())
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to refresh access token: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response: {e.response.text}")
+            raise
 
     def get_access_token(self) -> str:
         """
         Return a valid access token. If the current token is expired or missing,
         it refreshes automatically using the stored refresh token.
         """
-        if not self.access_token or time.time() >= self.expires_at:
-            return self.refresh_access_token()
+        if not self.access_token:
+            logger.info("No access token available")
+            if self.refresh_token:
+                return self.refresh_access_token()
+            else:
+                raise Exception("No access token or refresh token available")
+        
+        # Check if token is expired (with 60 second buffer)
+        if time.time() >= (self.expires_at - 60):
+            logger.info("Access token expired, refreshing")
+            if self.refresh_token:
+                return self.refresh_access_token()
+            else:
+                logger.warning("Token expired but no refresh token available")
+        
         return self.access_token
 
     def set_tokens(
@@ -210,7 +245,12 @@ class ZohoOAuth:
         if not self.domain and self.api_domain:
             self.domain = f"{self.api_domain}/trainercentral"
         if not self.org_id:
-            self.fetch_org_id_from_portals()
+            try:
+                self.fetch_org_id_from_portals()
+            except Exception as e:
+                logger.warning(f"Could not fetch org_id: {e}")
+        
+        logger.info(f"Tokens set. Domain: {self.domain}, Org ID: {self.org_id}")
 
     def fetch_org_id_from_portals(self, portals_base_url: Optional[str] = None) -> Optional[str]:
         """
@@ -222,20 +262,25 @@ class ZohoOAuth:
                               If omitted, uses self.domain or api_domain/trainercentral.
         """
         if not self.access_token:
+            logger.warning("Cannot fetch org_id: no access token")
             return None
 
         base = portals_base_url or self.domain
         if not base and self.api_domain:
             base = f"{self.api_domain}/trainercentral"
         if not base:
+            logger.warning("Cannot fetch org_id: no base URL")
             return None
 
         url = f"{base.rstrip('/')}/portals.json"
         headers = {"Authorization": f"Bearer {self.access_token}"}
+        
         try:
+            logger.info(f"Fetching org_id from {url}")
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
+            
             # Expecting a list or dict containing an org identifier
             # Example: { "portals": [ { "id": "...", ... } ] }
             portals = data.get("portals") if isinstance(data, dict) else data
@@ -244,8 +289,12 @@ class ZohoOAuth:
                 org_candidate = first.get("id") if isinstance(first, dict) else None
                 if org_candidate:
                     self.org_id = org_candidate
+                    logger.info(f"Fetched org_id: {self.org_id}")
                     return self.org_id
-        except Exception:
-            # Best-effort; leave org_id unset if this fails.
+            
+            logger.warning(f"Could not extract org_id from portals response: {data}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching org_id from portals: {e}")
             return None
+        
         return None
