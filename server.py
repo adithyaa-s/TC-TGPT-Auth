@@ -97,7 +97,6 @@ def make_unauthorized_response(scope: str | None = None) -> Response:
 
 
 @app.post("/mcp")
-@app.post("/mcp/")
 async def mcp_endpoint(request: Request):
     """
     HTTP endpoint for MCP JSON-RPC 2.0 requests. ChatGPT sends POST requests
@@ -510,7 +509,54 @@ async def mcp_endpoint(request: Request):
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
             
-            # Import tool handlers dynamically
+            # Try to get the tool from FastMCP's registry first
+            try:
+                # FastMCP stores tools in a dict accessible via _tools or tools attribute
+                tool_registry = None
+                if hasattr(mcp, '_tools'):
+                    tool_registry = mcp._tools
+                elif hasattr(mcp, 'tools'):
+                    tool_registry = mcp.tools
+                elif hasattr(mcp, '_tool_registry'):
+                    tool_registry = mcp._tool_registry
+                
+                if tool_registry and tool_name in tool_registry:
+                    tool_obj = tool_registry[tool_name]
+                    # FunctionTool objects have a __wrapped__ attribute or func attribute
+                    if hasattr(tool_obj, '__wrapped__'):
+                        actual_func = tool_obj.__wrapped__
+                    elif hasattr(tool_obj, 'func'):
+                        actual_func = tool_obj.func
+                    elif hasattr(tool_obj, '_func'):
+                        actual_func = tool_obj._func
+                    elif callable(tool_obj) and not hasattr(tool_obj, '__call__'):
+                        # It might be the function itself if FastMCP stores it differently
+                        actual_func = tool_obj
+                    else:
+                        # Try to call it as-is (might be callable)
+                        actual_func = tool_obj
+                    
+                    # Call the actual function
+                    result = actual_func(**arguments)
+                    
+                    return JSONResponse({
+                        "jsonrpc": jsonrpc,
+                        "id": request_id,
+                        "result": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": json.dumps(result, indent=2),
+                                }
+                            ],
+                        },
+                    })
+            except Exception as e1:
+                # Fall back to direct module import if FastMCP registry doesn't work
+                pass
+            
+            # Fallback: Import tool handlers directly from modules
+            # This bypasses FastMCP's wrapper and calls the original function
             import importlib
             tool_module_map = {
                 "tc_create_course": ("tools.courses.course_handler", "tc_create_course"),
@@ -554,12 +600,150 @@ async def mcp_endpoint(request: Request):
             
             module_path, func_name = tool_module_map[tool_name]
             module = importlib.import_module(module_path)
-            tool_func = getattr(module, func_name)
+            tool_wrapper = getattr(module, func_name)
+            
+            # Extract the actual function from the FunctionTool wrapper
+            # FastMCP's @mcp.tool() decorator wraps functions, so we need to unwrap
+            import inspect
+            
+            actual_func = None
+            
+            # Strategy 1: Try inspect.unwrap (handles standard decorator patterns)
+            try:
+                unwrapped = inspect.unwrap(tool_wrapper, stop=(lambda f: f == tool_wrapper))
+                if callable(unwrapped) and unwrapped != tool_wrapper:
+                    actual_func = unwrapped
+            except (ValueError, AttributeError, TypeError):
+                pass
+            
+            # Strategy 2: Check for __wrapped__ attribute (functools.wraps pattern)
+            if not actual_func and hasattr(tool_wrapper, '__wrapped__'):
+                wrapped = tool_wrapper.__wrapped__
+                if callable(wrapped):
+                    actual_func = wrapped
+            
+            # Strategy 3: Check closure for the original function
+            if not actual_func and hasattr(tool_wrapper, '__closure__') and tool_wrapper.__closure__:
+                try:
+                    # The original function is often in the first closure cell
+                    for cell in tool_wrapper.__closure__:
+                        cell_contents = cell.cell_contents
+                        if callable(cell_contents) and not isinstance(cell_contents, type(tool_wrapper)):
+                            actual_func = cell_contents
+                            break
+                except:
+                    pass
+            
+            # Strategy 4: Try common attribute names
+            if not actual_func:
+                for attr_name in ['func', '_func', '__func__', 'function', '_function']:
+                    if hasattr(tool_wrapper, attr_name):
+                        candidate = getattr(tool_wrapper, attr_name)
+                        if callable(candidate):
+                            actual_func = candidate
+                            break
+            
+            # Strategy 5: Try FastMCP's internal registry
+            if not actual_func:
+                try:
+                    tool_registry = None
+                    if hasattr(mcp, '_tools'):
+                        tool_registry = mcp._tools
+                    elif hasattr(mcp, 'tools'):
+                        tool_registry = mcp.tools
+                    
+                    if tool_registry and tool_name in tool_registry:
+                        tool_obj = tool_registry[tool_name]
+                        # Try various ways to get the function
+                        if hasattr(tool_obj, '__wrapped__'):
+                            actual_func = tool_obj.__wrapped__
+                        elif hasattr(tool_obj, 'func'):
+                            actual_func = tool_obj.func
+                        elif hasattr(tool_obj, '_func'):
+                            actual_func = tool_obj._func
+                        elif callable(tool_obj) and not isinstance(tool_obj, type(tool_wrapper)):
+                            actual_func = tool_obj
+                except:
+                    pass
+            
+            # Strategy 6: Last resort - try to call it anyway (maybe it's actually callable)
+            if not actual_func:
+                if callable(tool_wrapper):
+                    # Even if it's a FunctionTool, try calling it
+                    # Some implementations make FunctionTool callable
+                    try:
+                        # Test call with empty args to see if it works
+                        test_result = tool_wrapper()
+                        # If that worked, it's callable but wrong signature - use it anyway
+                        actual_func = tool_wrapper
+                    except TypeError:
+                        # Expected - wrong number of args, but it means it's callable
+                        actual_func = tool_wrapper
+                    except:
+                        pass
+            
+            # If we still don't have a callable, try direct library call as last resort
+            if not actual_func or not callable(actual_func):
+                # Last resort: call the underlying library functions directly
+                # This maps tool names to their library classes and methods
+                library_fallback_map = {
+                    "tc_list_courses": ("library.courses", "TrainerCentralCourses", "list_courses"),
+                    "tc_get_course": ("library.courses", "TrainerCentralCourses", "get_course"),
+                    "tc_create_course": ("library.courses", "TrainerCentralCourses", "post_course"),
+                    "tc_update_course": ("library.courses", "TrainerCentralCourses", "update_course"),
+                    "tc_delete_course": ("library.courses", "TrainerCentralCourses", "delete_course"),
+                }
+                
+                if tool_name in library_fallback_map:
+                    try:
+                        lib_module_path, class_name, method_name = library_fallback_map[tool_name]
+                        lib_module = importlib.import_module(lib_module_path)
+                        lib_class = getattr(lib_module, class_name)
+                        lib_instance = lib_class()
+                        lib_method = getattr(lib_instance, method_name)
+                        
+                        # Map arguments appropriately
+                        if tool_name == "tc_list_courses":
+                            result = lib_method()
+                        elif tool_name == "tc_get_course":
+                            result = lib_method(arguments.get("course_id"))
+                        elif tool_name == "tc_create_course":
+                            result = lib_method(arguments.get("course_data"))
+                        elif tool_name == "tc_update_course":
+                            result = lib_method(arguments.get("course_id"), arguments.get("updates"))
+                        elif tool_name == "tc_delete_course":
+                            result = lib_method(arguments.get("course_id"))
+                        else:
+                            result = lib_method(**arguments)
+                        
+                        return JSONResponse({
+                            "jsonrpc": jsonrpc,
+                            "id": request_id,
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": json.dumps(result, indent=2),
+                                    }
+                                ],
+                            },
+                        })
+                    except Exception as fallback_error:
+                        pass  # Continue to error response
+                
+                return JSONResponse({
+                    "jsonrpc": jsonrpc,
+                    "id": request_id,
+                    "error": {
+                        "code": -32603,
+                        "message": f"Could not extract callable function from tool '{tool_name}'. Tool wrapper type: {type(tool_wrapper)}. Error details: {str(actual_func) if actual_func else 'No callable found'}",
+                    },
+                }, status_code=200)
             
             # Call the tool function
             try:
                 # Convert arguments dict to function parameters
-                result = tool_func(**arguments)
+                result = actual_func(**arguments)
                 
                 return JSONResponse({
                     "jsonrpc": jsonrpc,
@@ -573,13 +757,26 @@ async def mcp_endpoint(request: Request):
                         ],
                     },
                 })
+            except TypeError as te:
+                # Handle argument mismatches more gracefully
+                return JSONResponse({
+                    "jsonrpc": jsonrpc,
+                    "id": request_id,
+                    "error": {
+                        "code": -32602,
+                        "message": f"Invalid params: {str(te)}",
+                    },
+                }, status_code=200)
             except Exception as e:
+                import traceback
+                error_trace = traceback.format_exc()
                 return JSONResponse({
                     "jsonrpc": jsonrpc,
                     "id": request_id,
                     "error": {
                         "code": -32000,
                         "message": str(e),
+                        "data": error_trace if os.getenv("DEBUG") else None,
                     },
                 }, status_code=200)
         
