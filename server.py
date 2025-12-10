@@ -1021,7 +1021,7 @@ def sanitize_for_chatgpt(data: any) -> any:
         sanitized = {}
         for key, value in data.items():
             # Skip or truncate large text fields
-            if key in ['description', 'content', 'richTextContent', 'body', 'html']:
+            if key in ['description', 'content', 'richTextContent', 'body', 'html', 'label', 'richText']:
                 if isinstance(value, str):
                     # Remove HTML tags
                     clean = re.sub(r'<[^>]+>', '', value)
@@ -1252,7 +1252,7 @@ def create_request_context(access_token: str):
 async def mcp_endpoint(request: Request, authorization: str | None = Header(None)):
     """
     HTTP endpoint for MCP JSON-RPC 2.0 requests. ChatGPT sends POST requests
-    here with JSON-RPC payloads. We route them to the FastMCP instance.
+    here with JSON-RPC payloads. We route them to the library functions.
     """
     logger.info(f"MCP request received from {request.client.host}")
     
@@ -1269,7 +1269,6 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
         # Handle MCP protocol methods that don't require auth
         if method == "initialize":
             logger.info("Handling initialize request")
-            # Return server capabilities
             result = {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
@@ -1288,8 +1287,9 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
         
         elif method == "tools/list":
             logger.info("Handling tools/list request")
-            # List all registered tools
+            
             tools_list = [
+                # COURSES
                 {
                     "name": "tc_create_course",
                     "description": "Create a new course in TrainerCentral",
@@ -1298,20 +1298,11 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                         "properties": {
                             "course_data": {
                                 "type": "object",
-                                "description": "Course data including courseName, subTitle, description, courseCategories",
+                                "description": "Course details",
                                 "properties": {
                                     "courseName": {"type": "string"},
                                     "subTitle": {"type": "string"},
                                     "description": {"type": "string"},
-                                    "courseCategories": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "categoryName": {"type": "string"}
-                                            }
-                                        }
-                                    }
                                 },
                                 "required": ["courseName"]
                             }
@@ -1321,14 +1312,11 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                 },
                 {
                     "name": "tc_get_course",
-                    "description": "Retrieve a course by its ID",
+                    "description": "Get course details by ID",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "course_id": {
-                                "type": "string",
-                                "description": "ID of the course to retrieve"
-                            }
+                            "course_id": {"type": "string", "description": "Course ID"}
                         },
                         "required": ["course_id"]
                     }
@@ -1338,15 +1326,12 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                     "description": "List all courses",
                     "inputSchema": {
                         "type": "object",
-                        "properties": {
-                            "limit": {"type": "integer", "description": "Maximum number of courses to return"},
-                            "si": {"type": "integer", "description": "Start index for pagination"}
-                        }
+                        "properties": {}
                     }
                 },
                 {
                     "name": "tc_update_course",
-                    "description": "Update an existing course",
+                    "description": "Update a course",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -1358,13 +1343,254 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                 },
                 {
                     "name": "tc_delete_course",
-                    "description": "Delete a course permanently",
+                    "description": "Delete a course",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "course_id": {"type": "string"}
                         },
                         "required": ["course_id"]
+                    }
+                },
+                # CHAPTERS
+                {
+                    "name": "tc_create_chapter",
+                    "description": "Create a chapter under a course",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "section_data": {
+                                "type": "object",
+                                "properties": {
+                                    "courseId": {"type": "string"},
+                                    "name": {"type": "string"}
+                                },
+                                "required": ["courseId", "name"]
+                            }
+                        },
+                        "required": ["section_data"]
+                    }
+                },
+                {
+                    "name": "tc_update_chapter",
+                    "description": "Update a chapter",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "course_id": {"type": "string"},
+                            "section_id": {"type": "string"},
+                            "updates": {"type": "object"}
+                        },
+                        "required": ["course_id", "section_id", "updates"]
+                    }
+                },
+                {
+                    "name": "tc_delete_chapter",
+                    "description": "Delete a chapter",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "course_id": {"type": "string"},
+                            "section_id": {"type": "string"}
+                        },
+                        "required": ["course_id", "section_id"]
+                    }
+                },
+                # LESSONS
+                {
+                    "name": "tc_create_lesson",
+                    "description": "Create a lesson with content",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_data": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "courseId": {"type": "string"},
+                                    "sectionId": {"type": "string"},
+                                    "deliveryMode": {"type": "integer", "default": 4}
+                                },
+                                "required": ["name", "courseId"]
+                            },
+                            "content_html": {"type": "string", "description": "HTML content for the lesson"},
+                            "content_filename": {"type": "string", "default": "Content"}
+                        },
+                        "required": ["session_data", "content_html"]
+                    }
+                },
+                {
+                    "name": "tc_update_lesson",
+                    "description": "Update a lesson",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"},
+                            "updates": {"type": "object"}
+                        },
+                        "required": ["session_id", "updates"]
+                    }
+                },
+                {
+                    "name": "tc_delete_lesson",
+                    "description": "Delete a lesson",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"}
+                        },
+                        "required": ["session_id"]
+                    }
+                },
+                # ASSIGNMENTS
+                {
+                    "name": "tc_create_assignment",
+                    "description": "Create an assignment with instructions",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "assignment_data": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "courseId": {"type": "string"},
+                                    "sectionId": {"type": "string"},
+                                    "deliveryMode": {"type": "integer", "default": 7}
+                                },
+                                "required": ["name", "courseId"]
+                            },
+                            "instruction_html": {"type": "string"},
+                            "instruction_filename": {"type": "string", "default": "Instructions"}
+                        },
+                        "required": ["assignment_data", "instruction_html"]
+                    }
+                },
+                {
+                    "name": "tc_delete_assignment",
+                    "description": "Delete an assignment",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"}
+                        },
+                        "required": ["session_id"]
+                    }
+                },
+                # TESTS
+                {
+                    "name": "tc_create_full_test",
+                    "description": "Create a complete test with questions under a lesson",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string", "description": "Lesson ID where test will be created"},
+                            "name": {"type": "string", "description": "Test name"},
+                            "description_html": {"type": "string", "description": "Test instructions"},
+                            "questions": {"type": "object", "description": "Questions in TC format"}
+                        },
+                        "required": ["session_id", "name", "description_html", "questions"]
+                    }
+                },
+                {
+                    "name": "tc_get_course_sessions",
+                    "description": "Get all sessions (lessons) of a course (needed before creating tests)",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "course_id": {"type": "string"}
+                        },
+                        "required": ["course_id"]
+                    }
+                },
+                # GLOBAL WORKSHOPS
+                {
+                    "name": "tc_create_workshop",
+                    "description": "Create a global live workshop (not tied to a course)",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description_html": {"type": "string"},
+                            "start_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"},
+                            "end_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"}
+                        },
+                        "required": ["name", "description_html", "start_time", "end_time"]
+                    }
+                },
+                {
+                    "name": "tc_update_workshop",
+                    "description": "Update a global workshop",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"},
+                            "updates": {"type": "object"}
+                        },
+                        "required": ["session_id", "updates"]
+                    }
+                },
+                {
+                    "name": "tc_list_all_global_workshops",
+                    "description": "List all upcoming global workshops",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "filter_type": {"type": "integer", "default": 5},
+                            "limit": {"type": "integer", "default": 50}
+                        }
+                    }
+                },
+                # COURSE LIVE WORKSHOPS
+                {
+                    "name": "tc_create_course_live_session",
+                    "description": "Create a live workshop inside a course",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "course_id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "description_html": {"type": "string"},
+                            "start_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"},
+                            "end_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"}
+                        },
+                        "required": ["course_id", "name", "description_html", "start_time", "end_time"]
+                    }
+                },
+                {
+                    "name": "tc_list_course_live_sessions",
+                    "description": "List upcoming course live sessions",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "filter_type": {"type": "integer", "default": 5},
+                            "limit": {"type": "integer", "default": 50}
+                        }
+                    }
+                },
+                {
+                    "name": "tc_delete_course_live_session",
+                    "description": "Delete a course live session",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"}
+                        },
+                        "required": ["session_id"]
+                    }
+                },
+                {
+                    "name": "invite_learner_to_course_or_course_live_session",
+                    "description": "Invite a learner to a course or course live session",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "email": {"type": "string"},
+                            "first_name": {"type": "string"},
+                            "last_name": {"type": "string"},
+                            "course_id": {"type": "string"},
+                            "session_id": {"type": "string"}
+                        },
+                        "required": ["email", "first_name", "last_name"]
                     }
                 },
             ]
@@ -1409,16 +1635,54 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
             
             logger.info(f"Calling tool: {tool_name} with args: {arguments}")
             
-            # Map tool names to library functions
+            # COMPLETE TOOL MAP - All TrainerCentral tools
             tool_map = {
+                # COURSES
                 "tc_create_course": ("courses", "TrainerCentralCourses", "post_course", lambda a: (a.get("course_data"),)),
                 "tc_get_course": ("courses", "TrainerCentralCourses", "get_course", lambda a: (a.get("course_id"),)),
                 "tc_list_courses": ("courses", "TrainerCentralCourses", "list_courses", lambda a: ()),
                 "tc_update_course": ("courses", "TrainerCentralCourses", "update_course", lambda a: (a.get("course_id"), a.get("updates"))),
                 "tc_delete_course": ("courses", "TrainerCentralCourses", "delete_course", lambda a: (a.get("course_id"),)),
+                
+                # CHAPTERS
                 "tc_create_chapter": ("chapters", "TrainerCentralChapters", "create_chapter", lambda a: (a.get("section_data"),)),
                 "tc_update_chapter": ("chapters", "TrainerCentralChapters", "update_chapter", lambda a: (a.get("course_id"), a.get("section_id"), a.get("updates"))),
                 "tc_delete_chapter": ("chapters", "TrainerCentralChapters", "delete_chapter", lambda a: (a.get("course_id"), a.get("section_id"))),
+                
+                # LESSONS
+                "tc_create_lesson": ("lessons", "TrainerCentralLessons", "create_lesson_with_content", 
+                    lambda a: (a.get("session_data"), a.get("content_html"), a.get("content_filename", "Content"))),
+                "tc_update_lesson": ("lessons", "TrainerCentralLessons", "update_lesson", lambda a: (a.get("session_id"), a.get("updates"))),
+                "tc_delete_lesson": ("lessons", "TrainerCentralLessons", "delete_lesson", lambda a: (a.get("session_id"),)),
+                
+                # ASSIGNMENTS
+                "tc_create_assignment": ("assignments", "TrainerCentralAssignments", "create_assignment_with_instructions",
+                    lambda a: (a.get("assignment_data"), a.get("instruction_html"), a.get("instruction_filename", "Instructions"), a.get("view_type", 4))),
+                "tc_delete_assignment": ("assignments", "TrainerCentralAssignments", "delete_assignment", lambda a: (a.get("session_id"),)),
+                
+                # TESTS
+                "tc_create_full_test": ("tests", "TrainerCentralTests", "create_full_test",
+                    lambda a: (a.get("session_id"), a.get("name"), a.get("description_html"), a.get("questions"))),
+                "tc_get_course_sessions": ("tests", "TrainerCentralTests", "get_course_sessions", lambda a: (a.get("course_id"),)),
+                
+                # GLOBAL WORKSHOPS
+                "tc_create_workshop": ("live_workshops", "TrainerCentralLiveWorkshops", "create_global_workshop",
+                    lambda a: (a.get("name"), a.get("description_html"), a.get("start_time"), a.get("end_time"))),
+                "tc_update_workshop": ("live_workshops", "TrainerCentralLiveWorkshops", "update_workshop",
+                    lambda a: (a.get("session_id"), a.get("updates"))),
+                "tc_list_all_global_workshops": ("live_workshops", "TrainerCentralLiveWorkshops", "list_all_upcoming_workshops",
+                    lambda a: (a.get("filter_type", 5), a.get("limit", 50), a.get("si", 0))),
+                
+                # COURSE LIVE WORKSHOPS
+                "tc_create_course_live_session": ("course_live_workshops", "TrainerCentralLiveWorkshops", "create_course_live_workshop",
+                    lambda a: (a.get("course_id"), a.get("name"), a.get("description_html"), a.get("start_time"), a.get("end_time"))),
+                "tc_list_course_live_sessions": ("course_live_workshops", "TrainerCentralLiveWorkshops", "list_upcoming_live_sessions",
+                    lambda a: (a.get("filter_type", 5), a.get("limit", 50), a.get("si", 0))),
+                "tc_delete_course_live_session": ("course_live_workshops", "TrainerCentralLiveWorkshops", "delete_live_session",
+                    lambda a: (a.get("session_id"),)),
+                "invite_learner_to_course_or_course_live_session": ("course_live_workshops", "TrainerCentralLiveWorkshops", "invite_learner_to_course_or_course_live_session",
+                    lambda a: (a.get("email"), a.get("first_name"), a.get("last_name"), a.get("course_id"), a.get("session_id"),
+                               a.get("is_access_granted", True), a.get("expiry_time"), a.get("expiry_duration"))),
             }
             
             if tool_name not in tool_map:
@@ -1464,7 +1728,7 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                 # Check result size
                 result_json = json.dumps(result, indent=2)
                 if len(result_json) > 10000:
-                    logger.warning(f"Large response ({len(result_json)} bytes), may cause issues")
+                    logger.warning(f"Large response ({len(result_json)} bytes), truncating")
                     # Further truncate if needed
                     result = {
                         "data": result,
@@ -1545,5 +1809,6 @@ async def mcp_get():
         "status": "ok",
         "protocol": "mcp",
         "version": "2024-11-05",
-        "name": "trainercentral-mcp"
+        "name": "trainercentral-mcp",
+        "tools_count": 21
     })
