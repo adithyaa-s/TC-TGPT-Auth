@@ -4,7 +4,7 @@ TrainerCentral Chapters (Sections) API wrapper
 
 import requests
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 
 class TrainerCentralChapters:
@@ -58,13 +58,13 @@ class TrainerCentralChapters:
     
     def get_chapter(self, section_id: str) -> Dict[str, Any]:
         """
-        Get details of a specific chapter
+        Get details of a specific chapter including its name
         
         Args:
             section_id: The section ID
         
         Returns:
-            Dict with section details
+            Dict with section details including sectionName
         """
         url = f"{self.domain}/api/v4/{self.org_id}/sections/{section_id}.json"
         
@@ -74,6 +74,62 @@ class TrainerCentralChapters:
         )
         response.raise_for_status()
         return response.json()
+    
+    def list_course_chapters(self, course_id: str) -> Dict[str, Any]:
+        """
+        List all chapters in a course with their names
+        
+        Args:
+            course_id: The course ID
+        
+        Returns:
+            Dict with list of sections including names
+        """
+        url = f"{self.domain}/api/v4/{self.org_id}/course/{course_id}/sections.json"
+        
+        response = requests.get(
+            url,
+            headers=self._get_headers()
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    def get_chapters_with_details(self, course_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all chapters with full details including names.
+        This fetches the list and then gets details for each chapter.
+        
+        Args:
+            course_id: The course ID
+        
+        Returns:
+            List of dicts with full chapter details including names
+        """
+        # First get the list of chapter IDs
+        chapters_response = self.list_course_chapters(course_id)
+        
+        # Extract section IDs from response
+        section_ids = []
+        if 'sections' in chapters_response:
+            for section in chapters_response['sections']:
+                section_id = section.get('sectionId') or section.get('id')
+                if section_id:
+                    section_ids.append(section_id)
+        
+        # Fetch details for each chapter
+        detailed_chapters = []
+        for section_id in section_ids:
+            try:
+                chapter_details = self.get_chapter(section_id)
+                detailed_chapters.append(chapter_details)
+            except Exception as e:
+                # If we can't get details, include what we have
+                detailed_chapters.append({
+                    "sectionId": section_id,
+                    "error": str(e)
+                })
+        
+        return detailed_chapters
     
     def update_chapter(self, course_id: str, section_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -125,23 +181,4 @@ class TrainerCentralChapters:
         if response.status_code == 204:
             return {"success": True, "message": "Chapter deleted successfully", "sectionId": section_id}
         
-        return response.json()
-    
-    def list_course_chapters(self, course_id: str) -> Dict[str, Any]:
-        """
-        List all chapters in a course
-        
-        Args:
-            course_id: The course ID
-        
-        Returns:
-            Dict with list of sections
-        """
-        url = f"{self.domain}/api/v4/{self.org_id}/course/{course_id}/sections.json"
-        
-        response = requests.get(
-            url,
-            headers=self._get_headers()
-        )
-        response.raise_for_status()
         return response.json()

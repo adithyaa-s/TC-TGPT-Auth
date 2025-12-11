@@ -1841,7 +1841,6 @@
 
 # ------
 
-
 """
 Lightweight HTTP server to expose the well-known OAuth metadata required by
 ChatGPT Apps SDK / MCP authorization spec. This does NOT implement Zoho OAuth;
@@ -1851,6 +1850,7 @@ Zoho and then call this MCP server with the bearer token.
 Also serves the MCP server over HTTP/JSON-RPC at /mcp endpoint.
 
 NO SANITIZATION - Returns raw API responses for debugging/testing.
+Includes chapter listing tools to get section names.
 """
 
 import os
@@ -2158,6 +2158,28 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                     }
                 },
                 {
+                    "name": "tc_get_chapter",
+                    "description": "Get details of a specific chapter including its name",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "section_id": {"type": "string", "description": "Section/Chapter ID"}
+                        },
+                        "required": ["section_id"]
+                    }
+                },
+                {
+                    "name": "tc_list_course_chapters",
+                    "description": "List all chapters in a course with their names and details",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "course_id": {"type": "string", "description": "Course ID"}
+                        },
+                        "required": ["course_id"]
+                    }
+                },
+                {
                     "name": "tc_update_chapter",
                     "description": "Update a chapter",
                     "inputSchema": {
@@ -2203,6 +2225,28 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                             "content_filename": {"type": "string", "default": "Content"}
                         },
                         "required": ["session_data", "content_html"]
+                    }
+                },
+                {
+                    "name": "tc_get_lesson",
+                    "description": "Get details of a specific lesson",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string", "description": "Lesson/Session ID"}
+                        },
+                        "required": ["session_id"]
+                    }
+                },
+                {
+                    "name": "tc_list_course_lessons",
+                    "description": "List all lessons in a course",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "course_id": {"type": "string", "description": "Course ID"}
+                        },
+                        "required": ["course_id"]
                     }
                 },
                 {
@@ -2432,12 +2476,16 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                 
                 # CHAPTERS
                 "tc_create_chapter": ("chapters", "TrainerCentralChapters", "create_chapter", lambda a: (a.get("section_data"),)),
+                "tc_get_chapter": ("chapters", "TrainerCentralChapters", "get_chapter", lambda a: (a.get("section_id"),)),
+                "tc_list_course_chapters": ("chapters", "TrainerCentralChapters", "get_chapters_with_details", lambda a: (a.get("course_id"),)),
                 "tc_update_chapter": ("chapters", "TrainerCentralChapters", "update_chapter", lambda a: (a.get("course_id"), a.get("section_id"), a.get("updates"))),
                 "tc_delete_chapter": ("chapters", "TrainerCentralChapters", "delete_chapter", lambda a: (a.get("course_id"), a.get("section_id"))),
                 
                 # LESSONS
                 "tc_create_lesson": ("lessons", "TrainerCentralLessons", "create_lesson_with_content", 
                     lambda a: (a.get("session_data"), a.get("content_html"), a.get("content_filename", "Content"))),
+                "tc_get_lesson": ("lessons", "TrainerCentralLessons", "get_lesson", lambda a: (a.get("session_id"),)),
+                "tc_list_course_lessons": ("lessons", "TrainerCentralLessons", "list_course_lessons", lambda a: (a.get("course_id"),)),
                 "tc_update_lesson": ("lessons", "TrainerCentralLessons", "update_lesson", lambda a: (a.get("session_id"), a.get("updates"))),
                 "tc_delete_lesson": ("lessons", "TrainerCentralLessons", "delete_lesson", lambda a: (a.get("session_id"),)),
                 
@@ -2582,5 +2630,5 @@ async def mcp_get():
         "protocol": "mcp",
         "version": "2024-11-05",
         "name": "trainercentral-mcp",
-        "tools_count": 21
+        "tools_count": 24
     })
