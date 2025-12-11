@@ -970,6 +970,878 @@
 #     })
 
 
+
+# ---------------
+
+
+# """
+# Lightweight HTTP server to expose the well-known OAuth metadata required by
+# ChatGPT Apps SDK / MCP authorization spec. This does NOT implement Zoho OAuth;
+# it simply advertises metadata so ChatGPT can complete the OAuth flow against
+# Zoho and then call this MCP server with the bearer token.
+
+# Also serves the MCP server over HTTP/JSON-RPC at /mcp endpoint.
+# """
+
+# import os
+# import json
+# import logging
+# import re
+# from typing import Dict, List, Any
+
+# from fastapi import FastAPI, Response, Request, Header
+# from fastapi.responses import JSONResponse
+
+# # Configure logging
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
+
+# # Base URL where this MCP server is reachable by ChatGPT (Render public URL)
+# RESOURCE_BASE_URL = os.getenv("RESOURCE_BASE_URL", "https://tc-tgpt-auth.onrender.com").rstrip("/")
+
+# # Zoho accounts base (region-specific)
+# ZOHO_ACCOUNTS_URL = os.getenv("ZOHO_ACCOUNTS_URL", "https://accounts.zoho.in").rstrip("/")
+
+# # Scopes we want to request from ChatGPT for TrainerCentral
+# DEFAULT_SCOPES: List[str] = [
+#     "TrainerCentral.courseapi.ALL",
+#     "TrainerCentral.sessionapi.ALL",
+#     "TrainerCentral.sectionapi.ALL",
+#     "TrainerCentral.talkapi.ALL",
+#     "TrainerCentral.userapi.ALL",
+#     "TrainerCentral.portalapi.ALL",
+# ]
+
+# app = FastAPI()
+
+
+# def is_trainercentral_id(value: str) -> bool:
+#     """
+#     Check if a string looks like a TrainerCentral ID.
+#     TrainerCentral IDs are typically 17-21 digit numbers.
+#     """
+#     if not isinstance(value, str):
+#         return False
+#     # Match numeric strings between 15-25 characters (TrainerCentral IDs)
+#     return bool(re.match(r'^\d{15,25}$', value))
+
+
+# def sanitize_for_chatgpt(data: any, depth: int = 0) -> any:
+#     """
+#     Sanitize response data to prevent OpenAI safety blocks.
+#     Removes HTML, URLs, emails, but PRESERVES IDs for subsequent calls.
+#     """
+#     # Prevent infinite recursion
+#     if depth > 10:
+#         return data
+    
+#     if isinstance(data, dict):
+#         sanitized = {}
+#         for key, value in data.items():
+#             # CRITICAL: Never sanitize fields that contain IDs
+#             # These are needed for subsequent API calls
+#             if any(id_field in key.lower() for id_field in ['id', 'key', 'token', 'code']):
+#                 sanitized[key] = value  # Keep IDs unchanged
+#             # Truncate large text fields
+#             elif key in ['description', 'content', 'richTextContent', 'body', 'html', 'label', 'richText']:
+#                 if isinstance(value, str):
+#                     # Remove HTML tags
+#                     clean = re.sub(r'<[^>]+>', '', value)
+#                     # Remove extra whitespace
+#                     clean = ' '.join(clean.split())
+#                     # Limit to 500 chars
+#                     clean = clean[:500] + ('...' if len(clean) > 500 else '')
+#                     sanitized[key] = clean
+#                 else:
+#                     sanitized[key] = sanitize_for_chatgpt(value, depth + 1)
+#             else:
+#                 sanitized[key] = sanitize_for_chatgpt(value, depth + 1)
+#         return sanitized
+    
+#     elif isinstance(data, list):
+#         # Limit list size to prevent huge responses
+#         limited = data[:20]  # Only first 20 items
+#         return [sanitize_for_chatgpt(item, depth + 1) for item in limited]
+    
+#     elif isinstance(data, str):
+#         # Don't sanitize if it looks like a TrainerCentral ID
+#         if is_trainercentral_id(data):
+#             return data
+        
+#         # Remove URLs
+#         text = re.sub(r'https?://\S+', '[URL]', data)
+#         # Remove emails  
+#         text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]', text)
+#         # DON'T remove phone numbers - they might be IDs!
+#         # Limit length
+#         if len(text) > 1000:
+#             text = text[:1000] + '...'
+#         return text
+    
+#     return data
+
+
+# def sanitize_courses_response(courses_data: dict) -> dict:
+#     """
+#     Specifically sanitize course list responses to prevent OpenAI blocking.
+#     Preserves IDs for subsequent calls.
+#     """
+#     if 'courses' not in courses_data:
+#         return sanitize_for_chatgpt(courses_data)
+    
+#     courses = courses_data['courses']
+#     sanitized_courses = []
+    
+#     # Limit to 10 courses max
+#     for course in courses[:10]:
+#         sanitized = {
+#             'courseId': course.get('courseId', ''),  # Preserve ID
+#             'courseName': course.get('courseName', ''),
+#             'status': course.get('status', ''),
+#         }
+        
+#         # Only include safe, short descriptions
+#         if 'subTitle' in course:
+#             subtitle = str(course['subTitle'])
+#             # Strip HTML and limit
+#             subtitle = re.sub(r'<[^>]+>', '', subtitle)
+#             subtitle = subtitle[:100]
+#             sanitized['subTitle'] = subtitle
+        
+#         if 'description' in course:
+#             desc = str(course['description'])
+#             # Strip HTML and limit
+#             desc = re.sub(r'<[^>]+>', '', desc)
+#             desc = desc[:200]
+#             sanitized['description'] = desc
+        
+#         sanitized_courses.append(sanitized)
+    
+#     return {
+#         'courses': sanitized_courses,
+#         'total': len(courses),
+#         'showing': len(sanitized_courses),
+#         'message': 'Showing first 10 courses. Use tc_get_course(course_id) for full details.'
+#     }
+
+
+# def resource_metadata() -> Dict:
+#     """
+#     Metadata for this protected resource, per RFC 9728 / Apps SDK guide.
+#     """
+#     return {
+#         "resource": RESOURCE_BASE_URL,
+#         "authorization_servers": [ZOHO_ACCOUNTS_URL],
+#         "scopes_supported": DEFAULT_SCOPES,
+#         "resource_documentation": f"{RESOURCE_BASE_URL}/docs",
+#     }
+
+
+# def oauth_authorization_server_metadata() -> Dict:
+#     """
+#     Static OAuth authorization-server metadata. Since we cannot modify Zoho's
+#     well-known, we mirror the essential fields here and point to Zoho endpoints.
+#     """
+#     return {
+#         "issuer": ZOHO_ACCOUNTS_URL,
+#         "authorization_endpoint": f"{ZOHO_ACCOUNTS_URL}/oauth/v2/auth",
+#         "token_endpoint": f"{ZOHO_ACCOUNTS_URL}/oauth/v2/token",
+#         # ChatGPT uses PKCE (S256)
+#         "code_challenge_methods_supported": ["S256"],
+#         "scopes_supported": DEFAULT_SCOPES,
+#         "grant_types_supported": ["authorization_code", "refresh_token"],
+#     }
+
+
+# @app.get("/.well-known/oauth-protected-resource")
+# async def well_known_oauth_protected_resource():
+#     """OAuth protected resource metadata endpoint"""
+#     logger.info("OAuth protected resource metadata requested")
+#     return resource_metadata()
+
+
+# @app.get("/.well-known/oauth-authorization-server")
+# async def well_known_oauth_authorization_server():
+#     """OAuth authorization server metadata endpoint"""
+#     logger.info("OAuth authorization server metadata requested")
+#     return oauth_authorization_server_metadata()
+
+
+# @app.get("/.well-known/openid-configuration")
+# async def well_known_openid_configuration():
+#     """OpenID configuration endpoint (mirrors OAuth metadata)"""
+#     logger.info("OpenID configuration requested")
+#     return oauth_authorization_server_metadata()
+
+
+# @app.get("/")
+# async def root():
+#     """Root endpoint with basic info"""
+#     return {
+#         "name": "TrainerCentral MCP Server",
+#         "version": "1.0.0",
+#         "status": "running",
+#         "endpoints": {
+#             "mcp": "/mcp",
+#             "oauth_metadata": "/.well-known/oauth-protected-resource",
+#             "health": "/healthz"
+#         }
+#     }
+
+
+# @app.get("/healthz")
+# async def healthz():
+#     """Health check endpoint"""
+#     return {"status": "ok"}
+
+
+# def make_unauthorized_response(scope: str | None = None) -> Response:
+#     """
+#     Helper to emit a WWW-Authenticate challenge. This can be used by
+#     MCP tool handlers when a token is missing/invalid to prompt ChatGPT
+#     to show the OAuth UI.
+#     """
+#     challenge = f'Bearer resource_metadata="{RESOURCE_BASE_URL}/.well-known/oauth-protected-resource"'
+#     if scope:
+#         challenge += f', scope="{scope}"'
+#     headers = {"WWW-Authenticate": challenge}
+#     return JSONResponse(
+#         {
+#             "jsonrpc": "2.0",
+#             "error": {
+#                 "code": 401,
+#                 "message": "Unauthorized - Missing or invalid access token"
+#             }
+#         },
+#         status_code=401,
+#         headers=headers
+#     )
+
+
+# def extract_access_token(authorization: str | None) -> str | None:
+#     """Extract access token from Authorization header"""
+#     if not authorization:
+#         return None
+    
+#     if not authorization.startswith("Bearer "):
+#         return None
+    
+#     return authorization.replace("Bearer ", "").strip()
+
+
+# def create_request_context(access_token: str):
+#     """
+#     Create a per-request OAuth context with the provided access token.
+#     This ensures each request has its own context without affecting other requests.
+#     """
+#     from library.oauth import ZohoOAuth
+#     from library.common_utils import TrainerCentralContext
+    
+#     # Get configuration from environment
+#     client_id = os.getenv("ZOHO_CLIENT_ID") or os.getenv("CLIENT_ID")
+#     client_secret = os.getenv("ZOHO_CLIENT_SECRET") or os.getenv("CLIENT_SECRET")
+#     refresh_token = os.getenv("ZOHO_REFRESH_TOKEN") or os.getenv("REFRESH_TOKEN")
+#     api_domain = os.getenv("API_DOMAIN") or os.getenv("ZOHO_API_DOMAIN")
+#     org_id = os.getenv("TRAINERCENTRAL_ORG_ID") or os.getenv("ORG_ID")
+#     domain = os.getenv("TRAINERCENTRAL_DOMAIN") or os.getenv("DOMAIN")
+#     accounts_url = os.getenv("ZOHO_ACCOUNTS_URL", "https://accounts.zoho.in")
+    
+#     # Create OAuth instance with the access token
+#     oauth = ZohoOAuth(
+#         client_id=client_id,
+#         client_secret=client_secret,
+#         refresh_token=refresh_token,
+#         access_token=access_token,
+#         api_domain=api_domain,
+#         org_id=org_id,
+#         domain=domain,
+#         accounts_base_url=accounts_url,
+#     )
+    
+#     # If org_id is missing, try to fetch it
+#     if not oauth.org_id:
+#         try:
+#             oauth.fetch_org_id_from_portals()
+#         except Exception as e:
+#             logger.warning(f"Could not fetch org_id from portals: {e}")
+    
+#     # Create and return context
+#     return TrainerCentralContext(
+#         domain=oauth.domain,
+#         org_id=oauth.org_id,
+#         oauth=oauth
+#     )
+
+
+# @app.post("/mcp")
+# async def mcp_endpoint(request: Request, authorization: str | None = Header(None)):
+#     """
+#     HTTP endpoint for MCP JSON-RPC 2.0 requests. ChatGPT sends POST requests
+#     here with JSON-RPC payloads. We route them to the library functions.
+#     """
+#     logger.info(f"MCP request received from {request.client.host}")
+    
+#     try:
+#         # Parse JSON-RPC request
+#         body = await request.json()
+#         method = body.get("method")
+#         params = body.get("params", {})
+#         request_id = body.get("id")
+#         jsonrpc = body.get("jsonrpc", "2.0")
+        
+#         logger.info(f"MCP Method: {method}, ID: {request_id}")
+        
+#         # Handle MCP protocol methods that don't require auth
+#         if method == "initialize":
+#             logger.info("Handling initialize request")
+#             result = {
+#                 "protocolVersion": "2024-11-05",
+#                 "capabilities": {
+#                     "tools": {},
+#                 },
+#                 "serverInfo": {
+#                     "name": "trainercentral-mcp",
+#                     "version": "1.0.0",
+#                 },
+#             }
+#             return JSONResponse({
+#                 "jsonrpc": jsonrpc,
+#                 "id": request_id,
+#                 "result": result,
+#             })
+        
+#         elif method == "tools/list":
+#             logger.info("Handling tools/list request")
+            
+#             tools_list = [
+#                 # COURSES
+#                 {
+#                     "name": "tc_create_course",
+#                     "description": "Create a new course in TrainerCentral",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_data": {
+#                                 "type": "object",
+#                                 "description": "Course details",
+#                                 "properties": {
+#                                     "courseName": {"type": "string"},
+#                                     "subTitle": {"type": "string"},
+#                                     "description": {"type": "string"},
+#                                 },
+#                                 "required": ["courseName"]
+#                             }
+#                         },
+#                         "required": ["course_data"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_get_course",
+#                     "description": "Get course details by ID",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_id": {"type": "string", "description": "Course ID"}
+#                         },
+#                         "required": ["course_id"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_list_courses",
+#                     "description": "List all courses",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {}
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_update_course",
+#                     "description": "Update a course",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_id": {"type": "string"},
+#                             "updates": {"type": "object"}
+#                         },
+#                         "required": ["course_id", "updates"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_delete_course",
+#                     "description": "Delete a course",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_id": {"type": "string"}
+#                         },
+#                         "required": ["course_id"]
+#                     }
+#                 },
+#                 # CHAPTERS
+#                 {
+#                     "name": "tc_create_chapter",
+#                     "description": "Create a chapter under a course",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "section_data": {
+#                                 "type": "object",
+#                                 "properties": {
+#                                     "courseId": {"type": "string"},
+#                                     "name": {"type": "string"}
+#                                 },
+#                                 "required": ["courseId", "name"]
+#                             }
+#                         },
+#                         "required": ["section_data"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_update_chapter",
+#                     "description": "Update a chapter",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_id": {"type": "string"},
+#                             "section_id": {"type": "string"},
+#                             "updates": {"type": "object"}
+#                         },
+#                         "required": ["course_id", "section_id", "updates"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_delete_chapter",
+#                     "description": "Delete a chapter",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_id": {"type": "string"},
+#                             "section_id": {"type": "string"}
+#                         },
+#                         "required": ["course_id", "section_id"]
+#                     }
+#                 },
+#                 # LESSONS
+#                 {
+#                     "name": "tc_create_lesson",
+#                     "description": "Create a lesson with content",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "session_data": {
+#                                 "type": "object",
+#                                 "properties": {
+#                                     "name": {"type": "string"},
+#                                     "courseId": {"type": "string"},
+#                                     "sectionId": {"type": "string"},
+#                                     "deliveryMode": {"type": "integer", "default": 4}
+#                                 },
+#                                 "required": ["name", "courseId"]
+#                             },
+#                             "content_html": {"type": "string", "description": "HTML content for the lesson"},
+#                             "content_filename": {"type": "string", "default": "Content"}
+#                         },
+#                         "required": ["session_data", "content_html"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_update_lesson",
+#                     "description": "Update a lesson",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "session_id": {"type": "string"},
+#                             "updates": {"type": "object"}
+#                         },
+#                         "required": ["session_id", "updates"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_delete_lesson",
+#                     "description": "Delete a lesson",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "session_id": {"type": "string"}
+#                         },
+#                         "required": ["session_id"]
+#                     }
+#                 },
+#                 # ASSIGNMENTS
+#                 {
+#                     "name": "tc_create_assignment",
+#                     "description": "Create an assignment with instructions",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "assignment_data": {
+#                                 "type": "object",
+#                                 "properties": {
+#                                     "name": {"type": "string"},
+#                                     "courseId": {"type": "string"},
+#                                     "sectionId": {"type": "string"},
+#                                     "deliveryMode": {"type": "integer", "default": 7}
+#                                 },
+#                                 "required": ["name", "courseId"]
+#                             },
+#                             "instruction_html": {"type": "string"},
+#                             "instruction_filename": {"type": "string", "default": "Instructions"}
+#                         },
+#                         "required": ["assignment_data", "instruction_html"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_delete_assignment",
+#                     "description": "Delete an assignment",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "session_id": {"type": "string"}
+#                         },
+#                         "required": ["session_id"]
+#                     }
+#                 },
+#                 # TESTS
+#                 {
+#                     "name": "tc_create_full_test",
+#                     "description": "Create a complete test with questions under a lesson",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "session_id": {"type": "string", "description": "Lesson ID where test will be created"},
+#                             "name": {"type": "string", "description": "Test name"},
+#                             "description_html": {"type": "string", "description": "Test instructions"},
+#                             "questions": {"type": "object", "description": "Questions in TC format"}
+#                         },
+#                         "required": ["session_id", "name", "description_html", "questions"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_get_course_sessions",
+#                     "description": "Get all sessions (lessons) of a course (needed before creating tests)",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_id": {"type": "string"}
+#                         },
+#                         "required": ["course_id"]
+#                     }
+#                 },
+#                 # GLOBAL WORKSHOPS
+#                 {
+#                     "name": "tc_create_workshop",
+#                     "description": "Create a global live workshop (not tied to a course)",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "name": {"type": "string"},
+#                             "description_html": {"type": "string"},
+#                             "start_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"},
+#                             "end_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"}
+#                         },
+#                         "required": ["name", "description_html", "start_time", "end_time"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_update_workshop",
+#                     "description": "Update a global workshop",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "session_id": {"type": "string"},
+#                             "updates": {"type": "object"}
+#                         },
+#                         "required": ["session_id", "updates"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_list_all_global_workshops",
+#                     "description": "List all upcoming global workshops",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "filter_type": {"type": "integer", "default": 5},
+#                             "limit": {"type": "integer", "default": 50}
+#                         }
+#                     }
+#                 },
+#                 # COURSE LIVE WORKSHOPS
+#                 {
+#                     "name": "tc_create_course_live_session",
+#                     "description": "Create a live workshop inside a course",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "course_id": {"type": "string"},
+#                             "name": {"type": "string"},
+#                             "description_html": {"type": "string"},
+#                             "start_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"},
+#                             "end_time": {"type": "string", "description": "Format: DD-MM-YYYY HH:MMAM/PM"}
+#                         },
+#                         "required": ["course_id", "name", "description_html", "start_time", "end_time"]
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_list_course_live_sessions",
+#                     "description": "List upcoming course live sessions",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "filter_type": {"type": "integer", "default": 5},
+#                             "limit": {"type": "integer", "default": 50}
+#                         }
+#                     }
+#                 },
+#                 {
+#                     "name": "tc_delete_course_live_session",
+#                     "description": "Delete a course live session",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "session_id": {"type": "string"}
+#                         },
+#                         "required": ["session_id"]
+#                     }
+#                 },
+#                 {
+#                     "name": "invite_learner_to_course_or_course_live_session",
+#                     "description": "Invite a learner to a course or course live session",
+#                     "inputSchema": {
+#                         "type": "object",
+#                         "properties": {
+#                             "email": {"type": "string"},
+#                             "first_name": {"type": "string"},
+#                             "last_name": {"type": "string"},
+#                             "course_id": {"type": "string"},
+#                             "session_id": {"type": "string"}
+#                         },
+#                         "required": ["email", "first_name", "last_name"]
+#                     }
+#                 },
+#             ]
+            
+#             return JSONResponse({
+#                 "jsonrpc": jsonrpc,
+#                 "id": request_id,
+#                 "result": {
+#                     "tools": tools_list
+#                 },
+#             })
+        
+#         # For tool calls, we need authentication
+#         elif method == "tools/call":
+#             # Extract and validate access token
+#             access_token = extract_access_token(authorization)
+            
+#             if not access_token:
+#                 logger.warning("Missing or invalid Authorization header")
+#                 return make_unauthorized_response()
+            
+#             logger.info("Access token extracted successfully")
+            
+#             # Create per-request context with this token
+#             try:
+#                 context = create_request_context(access_token)
+#                 logger.info(f"Context created with org_id: {context.org_id}")
+#             except Exception as e:
+#                 logger.error(f"Failed to create context: {e}", exc_info=True)
+#                 return JSONResponse({
+#                     "jsonrpc": jsonrpc,
+#                     "id": request_id,
+#                     "error": {
+#                         "code": -32000,
+#                         "message": f"Failed to create request context: {str(e)}"
+#                     }
+#                 }, status_code=200)
+            
+#             # Get tool name and arguments
+#             tool_name = params.get("name")
+#             arguments = params.get("arguments", {})
+            
+#             logger.info(f"Calling tool: {tool_name} with args: {json.dumps(arguments)[:200]}")
+            
+#             # COMPLETE TOOL MAP - All TrainerCentral tools
+#             tool_map = {
+#                 # COURSES
+#                 "tc_create_course": ("courses", "TrainerCentralCourses", "post_course", lambda a: (a.get("course_data"),)),
+#                 "tc_get_course": ("courses", "TrainerCentralCourses", "get_course", lambda a: (a.get("course_id"),)),
+#                 "tc_list_courses": ("courses", "TrainerCentralCourses", "list_courses", lambda a: ()),
+#                 "tc_update_course": ("courses", "TrainerCentralCourses", "update_course", lambda a: (a.get("course_id"), a.get("updates"))),
+#                 "tc_delete_course": ("courses", "TrainerCentralCourses", "delete_course", lambda a: (a.get("course_id"),)),
+                
+#                 # CHAPTERS
+#                 "tc_create_chapter": ("chapters", "TrainerCentralChapters", "create_chapter", lambda a: (a.get("section_data"),)),
+#                 "tc_update_chapter": ("chapters", "TrainerCentralChapters", "update_chapter", lambda a: (a.get("course_id"), a.get("section_id"), a.get("updates"))),
+#                 "tc_delete_chapter": ("chapters", "TrainerCentralChapters", "delete_chapter", lambda a: (a.get("course_id"), a.get("section_id"))),
+                
+#                 # LESSONS
+#                 "tc_create_lesson": ("lessons", "TrainerCentralLessons", "create_lesson_with_content", 
+#                     lambda a: (a.get("session_data"), a.get("content_html"), a.get("content_filename", "Content"))),
+#                 "tc_update_lesson": ("lessons", "TrainerCentralLessons", "update_lesson", lambda a: (a.get("session_id"), a.get("updates"))),
+#                 "tc_delete_lesson": ("lessons", "TrainerCentralLessons", "delete_lesson", lambda a: (a.get("session_id"),)),
+                
+#                 # ASSIGNMENTS
+#                 "tc_create_assignment": ("assignments", "TrainerCentralAssignments", "create_assignment_with_instructions",
+#                     lambda a: (a.get("assignment_data"), a.get("instruction_html"), a.get("instruction_filename", "Instructions"), a.get("view_type", 4))),
+#                 "tc_delete_assignment": ("assignments", "TrainerCentralAssignments", "delete_assignment", lambda a: (a.get("session_id"),)),
+                
+#                 # TESTS
+#                 "tc_create_full_test": ("tests", "TrainerCentralTests", "create_full_test",
+#                     lambda a: (a.get("session_id"), a.get("name"), a.get("description_html"), a.get("questions"))),
+#                 "tc_get_course_sessions": ("tests", "TrainerCentralTests", "get_course_sessions", lambda a: (a.get("course_id"),)),
+                
+#                 # GLOBAL WORKSHOPS
+#                 "tc_create_workshop": ("live_workshops", "TrainerCentralLiveWorkshops", "create_global_workshop",
+#                     lambda a: (a.get("name"), a.get("description_html"), a.get("start_time"), a.get("end_time"))),
+#                 "tc_update_workshop": ("live_workshops", "TrainerCentralLiveWorkshops", "update_workshop",
+#                     lambda a: (a.get("session_id"), a.get("updates"))),
+#                 "tc_list_all_global_workshops": ("live_workshops", "TrainerCentralLiveWorkshops", "list_all_upcoming_workshops",
+#                     lambda a: (a.get("filter_type", 5), a.get("limit", 50), a.get("si", 0))),
+                
+#                 # COURSE LIVE WORKSHOPS
+#                 "tc_create_course_live_session": ("course_live_workshops", "TrainerCentralLiveWorkshops", "create_course_live_workshop",
+#                     lambda a: (a.get("course_id"), a.get("name"), a.get("description_html"), a.get("start_time"), a.get("end_time"))),
+#                 "tc_list_course_live_sessions": ("course_live_workshops", "TrainerCentralLiveWorkshops", "list_upcoming_live_sessions",
+#                     lambda a: (a.get("filter_type", 5), a.get("limit", 50), a.get("si", 0))),
+#                 "tc_delete_course_live_session": ("course_live_workshops", "TrainerCentralLiveWorkshops", "delete_live_session",
+#                     lambda a: (a.get("session_id"),)),
+#                 "invite_learner_to_course_or_course_live_session": ("course_live_workshops", "TrainerCentralLiveWorkshops", "invite_learner_to_course_or_course_live_session",
+#                     lambda a: (a.get("email"), a.get("first_name"), a.get("last_name"), a.get("course_id"), a.get("session_id"),
+#                                a.get("is_access_granted", True), a.get("expiry_time"), a.get("expiry_duration"))),
+#             }
+            
+#             if tool_name not in tool_map:
+#                 logger.warning(f"Unknown tool: {tool_name}")
+#                 return JSONResponse({
+#                     "jsonrpc": jsonrpc,
+#                     "id": request_id,
+#                     "error": {
+#                         "code": -32601,
+#                         "message": f"Tool not found: {tool_name}"
+#                     }
+#                 }, status_code=200)
+            
+#             # Call the library function with the per-request context
+#             module_name, class_name, method_name, arg_mapper = tool_map[tool_name]
+            
+#             try:
+#                 # Import the library module
+#                 lib_module = __import__(f"library.{module_name}", fromlist=[class_name])
+#                 lib_class = getattr(lib_module, class_name)
+                
+#                 # Instantiate with the per-request context
+#                 lib_instance = lib_class(context=context)
+#                 method = getattr(lib_instance, method_name)
+                
+#                 # Map arguments and call
+#                 args = arg_mapper(arguments)
+#                 if isinstance(args, tuple):
+#                     result = method(*args)
+#                 elif isinstance(args, dict):
+#                     result = method(**args)
+#                 else:
+#                     result = method(args)
+                
+#                 logger.info(f"Tool {tool_name} executed successfully")
+                
+#                 # Sanitize response based on tool type
+#                 if tool_name == "tc_list_courses":
+#                     result = sanitize_courses_response(result)
+#                 else:
+#                     result = sanitize_for_chatgpt(result)
+                
+#                 # Check result size
+#                 result_json = json.dumps(result, indent=2)
+#                 if len(result_json) > 10000:
+#                     logger.warning(f"Large response ({len(result_json)} bytes), truncating")
+#                     # Further truncate if needed
+#                     result = {
+#                         "data": result,
+#                         "warning": "Response truncated due to size"
+#                     }
+#                     result_json = json.dumps(result, indent=2)[:10000]
+                
+#                 # Return success response
+#                 return JSONResponse({
+#                     "jsonrpc": jsonrpc,
+#                     "id": request_id,
+#                     "result": {
+#                         "content": [
+#                             {
+#                                 "type": "text",
+#                                 "text": result_json
+#                             }
+#                         ]
+#                     }
+#                 })
+                
+#             except Exception as e:
+#                 logger.error(f"Error calling tool {tool_name}: {e}", exc_info=True)
+#                 import traceback
+#                 error_trace = traceback.format_exc()
+                
+#                 return JSONResponse({
+#                     "jsonrpc": jsonrpc,
+#                     "id": request_id,
+#                     "error": {
+#                         "code": -32000,
+#                         "message": f"Tool execution failed: {str(e)}",
+#                         "data": error_trace if os.getenv("DEBUG") else None
+#                     }
+#                 }, status_code=200)
+        
+#         else:
+#             # Unknown method
+#             logger.warning(f"Unknown method: {method}")
+#             return JSONResponse({
+#                 "jsonrpc": jsonrpc,
+#                 "id": request_id,
+#                 "error": {
+#                     "code": -32601,
+#                     "message": f"Method not found: {method}"
+#                 }
+#             }, status_code=200)
+    
+#     except json.JSONDecodeError as e:
+#         logger.error(f"JSON decode error: {e}")
+#         return JSONResponse({
+#             "jsonrpc": "2.0",
+#             "id": None,
+#             "error": {
+#                 "code": -32700,
+#                 "message": "Parse error - Invalid JSON"
+#             }
+#         }, status_code=200)
+    
+#     except Exception as e:
+#         logger.error(f"Unexpected error: {e}", exc_info=True)
+#         return JSONResponse({
+#             "jsonrpc": "2.0",
+#             "id": None,
+#             "error": {
+#                 "code": -32603,
+#                 "message": f"Internal error: {str(e)}"
+#             }
+#         }, status_code=200)
+
+
+# @app.get("/mcp")
+# async def mcp_get():
+#     """
+#     GET endpoint for health checks. Returns basic info.
+#     """
+#     return JSONResponse({
+#         "status": "ok",
+#         "protocol": "mcp",
+#         "version": "2024-11-05",
+#         "name": "trainercentral-mcp",
+#         "tools_count": 21
+#     })
+
+
+# ------
+
+
 """
 Lightweight HTTP server to expose the well-known OAuth metadata required by
 ChatGPT Apps SDK / MCP authorization spec. This does NOT implement Zoho OAuth;
@@ -977,12 +1849,13 @@ it simply advertises metadata so ChatGPT can complete the OAuth flow against
 Zoho and then call this MCP server with the bearer token.
 
 Also serves the MCP server over HTTP/JSON-RPC at /mcp endpoint.
+
+NO SANITIZATION - Returns raw API responses for debugging/testing.
 """
 
 import os
 import json
 import logging
-import re
 from typing import Dict, List, Any
 
 from fastapi import FastAPI, Response, Request, Header
@@ -1009,116 +1882,6 @@ DEFAULT_SCOPES: List[str] = [
 ]
 
 app = FastAPI()
-
-
-def is_trainercentral_id(value: str) -> bool:
-    """
-    Check if a string looks like a TrainerCentral ID.
-    TrainerCentral IDs are typically 17-21 digit numbers.
-    """
-    if not isinstance(value, str):
-        return False
-    # Match numeric strings between 15-25 characters (TrainerCentral IDs)
-    return bool(re.match(r'^\d{15,25}$', value))
-
-
-def sanitize_for_chatgpt(data: any, depth: int = 0) -> any:
-    """
-    Sanitize response data to prevent OpenAI safety blocks.
-    Removes HTML, URLs, emails, but PRESERVES IDs for subsequent calls.
-    """
-    # Prevent infinite recursion
-    if depth > 10:
-        return data
-    
-    if isinstance(data, dict):
-        sanitized = {}
-        for key, value in data.items():
-            # CRITICAL: Never sanitize fields that contain IDs
-            # These are needed for subsequent API calls
-            if any(id_field in key.lower() for id_field in ['id', 'key', 'token', 'code']):
-                sanitized[key] = value  # Keep IDs unchanged
-            # Truncate large text fields
-            elif key in ['description', 'content', 'richTextContent', 'body', 'html', 'label', 'richText']:
-                if isinstance(value, str):
-                    # Remove HTML tags
-                    clean = re.sub(r'<[^>]+>', '', value)
-                    # Remove extra whitespace
-                    clean = ' '.join(clean.split())
-                    # Limit to 500 chars
-                    clean = clean[:500] + ('...' if len(clean) > 500 else '')
-                    sanitized[key] = clean
-                else:
-                    sanitized[key] = sanitize_for_chatgpt(value, depth + 1)
-            else:
-                sanitized[key] = sanitize_for_chatgpt(value, depth + 1)
-        return sanitized
-    
-    elif isinstance(data, list):
-        # Limit list size to prevent huge responses
-        limited = data[:20]  # Only first 20 items
-        return [sanitize_for_chatgpt(item, depth + 1) for item in limited]
-    
-    elif isinstance(data, str):
-        # Don't sanitize if it looks like a TrainerCentral ID
-        if is_trainercentral_id(data):
-            return data
-        
-        # Remove URLs
-        text = re.sub(r'https?://\S+', '[URL]', data)
-        # Remove emails  
-        text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]', text)
-        # DON'T remove phone numbers - they might be IDs!
-        # Limit length
-        if len(text) > 1000:
-            text = text[:1000] + '...'
-        return text
-    
-    return data
-
-
-def sanitize_courses_response(courses_data: dict) -> dict:
-    """
-    Specifically sanitize course list responses to prevent OpenAI blocking.
-    Preserves IDs for subsequent calls.
-    """
-    if 'courses' not in courses_data:
-        return sanitize_for_chatgpt(courses_data)
-    
-    courses = courses_data['courses']
-    sanitized_courses = []
-    
-    # Limit to 10 courses max
-    for course in courses[:10]:
-        sanitized = {
-            'courseId': course.get('courseId', ''),  # Preserve ID
-            'courseName': course.get('courseName', ''),
-            'status': course.get('status', ''),
-        }
-        
-        # Only include safe, short descriptions
-        if 'subTitle' in course:
-            subtitle = str(course['subTitle'])
-            # Strip HTML and limit
-            subtitle = re.sub(r'<[^>]+>', '', subtitle)
-            subtitle = subtitle[:100]
-            sanitized['subTitle'] = subtitle
-        
-        if 'description' in course:
-            desc = str(course['description'])
-            # Strip HTML and limit
-            desc = re.sub(r'<[^>]+>', '', desc)
-            desc = desc[:200]
-            sanitized['description'] = desc
-        
-        sanitized_courses.append(sanitized)
-    
-    return {
-        'courses': sanitized_courses,
-        'total': len(courses),
-        'showing': len(sanitized_courses),
-        'message': 'Showing first 10 courses. Use tc_get_course(course_id) for full details.'
-    }
 
 
 def resource_metadata() -> Dict:
@@ -1274,6 +2037,8 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
     """
     HTTP endpoint for MCP JSON-RPC 2.0 requests. ChatGPT sends POST requests
     here with JSON-RPC payloads. We route them to the library functions.
+    
+    NO SANITIZATION - Returns raw API responses.
     """
     logger.info(f"MCP request received from {request.client.host}")
     
@@ -1654,7 +2419,7 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
             
-            logger.info(f"Calling tool: {tool_name} with args: {json.dumps(arguments)[:200]}")
+            logger.info(f"Calling tool: {tool_name}")
             
             # COMPLETE TOOL MAP - All TrainerCentral tools
             tool_map = {
@@ -1740,22 +2505,8 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
                 
                 logger.info(f"Tool {tool_name} executed successfully")
                 
-                # Sanitize response based on tool type
-                if tool_name == "tc_list_courses":
-                    result = sanitize_courses_response(result)
-                else:
-                    result = sanitize_for_chatgpt(result)
-                
-                # Check result size
+                # NO SANITIZATION - Return raw result
                 result_json = json.dumps(result, indent=2)
-                if len(result_json) > 10000:
-                    logger.warning(f"Large response ({len(result_json)} bytes), truncating")
-                    # Further truncate if needed
-                    result = {
-                        "data": result,
-                        "warning": "Response truncated due to size"
-                    }
-                    result_json = json.dumps(result, indent=2)[:10000]
                 
                 # Return success response
                 return JSONResponse({
