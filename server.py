@@ -970,7 +970,6 @@
 #     })
 
 
-
 """
 Lightweight HTTP server to expose the well-known OAuth metadata required by
 ChatGPT Apps SDK / MCP authorization spec. This does NOT implement Zoho OAuth;
@@ -1012,16 +1011,35 @@ DEFAULT_SCOPES: List[str] = [
 app = FastAPI()
 
 
-def sanitize_for_chatgpt(data: any) -> any:
+def is_trainercentral_id(value: str) -> bool:
+    """
+    Check if a string looks like a TrainerCentral ID.
+    TrainerCentral IDs are typically 17-21 digit numbers.
+    """
+    if not isinstance(value, str):
+        return False
+    # Match numeric strings between 15-25 characters (TrainerCentral IDs)
+    return bool(re.match(r'^\d{15,25}$', value))
+
+
+def sanitize_for_chatgpt(data: any, depth: int = 0) -> any:
     """
     Sanitize response data to prevent OpenAI safety blocks.
-    Removes HTML, URLs, emails, phone numbers, and limits text length.
+    Removes HTML, URLs, emails, but PRESERVES IDs for subsequent calls.
     """
+    # Prevent infinite recursion
+    if depth > 10:
+        return data
+    
     if isinstance(data, dict):
         sanitized = {}
         for key, value in data.items():
-            # Skip or truncate large text fields
-            if key in ['description', 'content', 'richTextContent', 'body', 'html', 'label', 'richText']:
+            # CRITICAL: Never sanitize fields that contain IDs
+            # These are needed for subsequent API calls
+            if any(id_field in key.lower() for id_field in ['id', 'key', 'token', 'code']):
+                sanitized[key] = value  # Keep IDs unchanged
+            # Truncate large text fields
+            elif key in ['description', 'content', 'richTextContent', 'body', 'html', 'label', 'richText']:
                 if isinstance(value, str):
                     # Remove HTML tags
                     clean = re.sub(r'<[^>]+>', '', value)
@@ -1031,23 +1049,26 @@ def sanitize_for_chatgpt(data: any) -> any:
                     clean = clean[:500] + ('...' if len(clean) > 500 else '')
                     sanitized[key] = clean
                 else:
-                    sanitized[key] = sanitize_for_chatgpt(value)
+                    sanitized[key] = sanitize_for_chatgpt(value, depth + 1)
             else:
-                sanitized[key] = sanitize_for_chatgpt(value)
+                sanitized[key] = sanitize_for_chatgpt(value, depth + 1)
         return sanitized
     
     elif isinstance(data, list):
         # Limit list size to prevent huge responses
         limited = data[:20]  # Only first 20 items
-        return [sanitize_for_chatgpt(item) for item in limited]
+        return [sanitize_for_chatgpt(item, depth + 1) for item in limited]
     
     elif isinstance(data, str):
+        # Don't sanitize if it looks like a TrainerCentral ID
+        if is_trainercentral_id(data):
+            return data
+        
         # Remove URLs
         text = re.sub(r'https?://\S+', '[URL]', data)
         # Remove emails  
         text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]', text)
-        # Remove phone numbers
-        text = re.sub(r'\+?1?\d{9,15}', '[PHONE]', text)
+        # DON'T remove phone numbers - they might be IDs!
         # Limit length
         if len(text) > 1000:
             text = text[:1000] + '...'
@@ -1059,7 +1080,7 @@ def sanitize_for_chatgpt(data: any) -> any:
 def sanitize_courses_response(courses_data: dict) -> dict:
     """
     Specifically sanitize course list responses to prevent OpenAI blocking.
-    This is the most common source of blocks due to HTML in descriptions.
+    Preserves IDs for subsequent calls.
     """
     if 'courses' not in courses_data:
         return sanitize_for_chatgpt(courses_data)
@@ -1070,7 +1091,7 @@ def sanitize_courses_response(courses_data: dict) -> dict:
     # Limit to 10 courses max
     for course in courses[:10]:
         sanitized = {
-            'courseId': course.get('courseId', ''),
+            'courseId': course.get('courseId', ''),  # Preserve ID
             'courseName': course.get('courseName', ''),
             'status': course.get('status', ''),
         }
@@ -1633,7 +1654,7 @@ async def mcp_endpoint(request: Request, authorization: str | None = Header(None
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
             
-            logger.info(f"Calling tool: {tool_name} with args: {arguments}")
+            logger.info(f"Calling tool: {tool_name} with args: {json.dumps(arguments)[:200]}")
             
             # COMPLETE TOOL MAP - All TrainerCentral tools
             tool_map = {
